@@ -1,0 +1,22 @@
+services:
+  db1:
+    image: postgres:alpine
+    container_name: postgres_db1
+    restart: always
+    environment:
+      POSTGRES_USER: usuario1
+      POSTGRES_PASSWORD: senha1
+      POSTGRES_DB: banco1
+    ports:
+      - "5432:5432"
+
+  db2:
+    image: postgres:alpine
+    container_name: postgres_db2
+    restart: always
+    environment:
+      POSTGRES_USER: usuario2
+      POSTGRES_PASSWORD: senha2
+      POSTGRES_DB: banco2
+    ports:
+      - "5433:5432"
