@@ -171,8 +171,8 @@ export default function Home() {
             <ul className="list-disc pl-5">
               {exams.map((exam, index) => (
                 <li key={index} className="mb-2">
-                  <strong>{exam.patient_name}</strong> - {exam.exam_type} (
-                  {exam.exam_date}) - Resultado: {exam.result} - Observações:{" "}
+                  <strong>{exam.patientName}</strong> - {exam.examType} (
+                  {exam.examDate}) - Resultado: {exam.result} - Observações:{" "}
                   {exam.observations}
                 </li>
               ))}

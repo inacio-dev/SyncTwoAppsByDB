@@ -2,7 +2,6 @@ services:
   db1:
     image: postgres:alpine
     container_name: postgres_db1
-    restart: always
     environment:
       POSTGRES_USER: usuario1
       POSTGRES_PASSWORD: senha1
@@ -11,12 +10,9 @@ services:
       - "5432:5432"
 
   db2:
-    image: postgres:alpine
-    container_name: postgres_db2
-    restart: always
-    environment:
-      POSTGRES_USER: usuario2
-      POSTGRES_PASSWORD: senha2
-      POSTGRES_DB: banco2
+    image: couchbase:community
+    container_name: couchbase_db2
     ports:
-      - "5433:5432"
+      - "8091:8091"   # Portal de administração e API REST
+      - "8092:8092"   # Serviço de consulta (query)
+      - "11210:11210" # Protocolo memcached para operações de dados

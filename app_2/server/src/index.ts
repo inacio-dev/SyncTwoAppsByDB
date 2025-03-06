@@ -2,29 +2,18 @@ import express, { Request, Response } from 'express';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import cors from 'cors';
+import * as couchbase from 'couchbase';
+import { randomUUID } from 'crypto';
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3010;
 
-// Middleware para interpretar JSON
 app.use(express.json());
-
-// Habilita CORS para todos os domínios
 app.use(cors());
 
-// Configuração do pool de conexões para o banco atual (banco2)
-const pool = new Pool({
-  user: process.env.DB_USER,       // Ex.: 'usuario2'
-  host: process.env.DB_HOST,       // Ex.: 'localhost'
-  database: process.env.DB_NAME,   // Ex.: 'banco2'
-  password: process.env.DB_PASS,   // Ex.: 'senha2'
-  port: Number(process.env.DB_PORT), // Ex.: 5433
-});
-
-// Configuração do pool para o outro banco (banco1)
-// As variáveis de ambiente aqui podem ter nomes diferentes (ex: DB1_USER, DB1_HOST, etc.)
+// Configuração do PostgreSQL
 const poolOther = new Pool({
   user: process.env.DB1_USER || 'usuario1',
   host: process.env.DB1_HOST || 'localhost',
@@ -33,104 +22,179 @@ const poolOther = new Pool({
   port: Number(process.env.DB1_PORT) || 5432,
 });
 
-// Interface definindo os campos do exame
+// Configuração do Couchbase
+let db2Cluster: couchbase.Cluster;
+let db2Bucket: couchbase.Bucket;
+let db2Collection: couchbase.Collection;
+
+// Interface do Exame
 interface Exam {
-  id?: number;
+  id?: string;
   patientName: string;
   examType: string;
-  examDate: string; // Formato ISO (YYYY-MM-DD)
+  examDate: string;
   result: string;
   observations: string;
+  sent_to_other?: boolean;
+  type?: string;
 }
 
-// Endpoint POST para inserir um exame no banco atual (banco2)
+// Inicialização do Couchbase
+async function initDb2() {
+  try {
+    const clusterConnStr = `couchbase://${process.env.DB_HOST}`;
+    const options = {
+      username: process.env.DB_USER,
+      password: process.env.DB_PASS,
+    };
+
+    db2Cluster = await couchbase.connect(clusterConnStr, options);
+    db2Bucket = db2Cluster.bucket(process.env.DB_NAME as string);
+    db2Collection = db2Bucket.defaultCollection();
+    
+    console.log('Conectado ao Couchbase com sucesso!');
+  } catch (error) {
+    console.error('Erro ao conectar ao Couchbase:', error);
+    throw error;
+  }
+}
+
+// Endpoints
 app.post('/exames', async (req: Request, res: Response): Promise<void> => {
   const { patientName, examType, examDate, result, observations } = req.body as Exam;
 
-  // Validação simples para garantir que todos os campos foram enviados
   if (!patientName || !examType || !examDate || !result || !observations) {
     res.status(400).json({ error: 'Todos os campos são obrigatórios.' });
     return;
   }
 
   try {
-    const insertQuery = `
-      INSERT INTO exames (patient_name, exam_type, exam_date, result, observations, sent_to_other)
-      VALUES ($1, $2, $3, $4, $5, false)
-      RETURNING *
-    `;
-    const values = [patientName, examType, examDate, result, observations];
-    const dbResponse = await pool.query(insertQuery, values);
+    const id = randomUUID();
+    const exam: Exam = {
+      id,
+      patientName,
+      examType,
+      examDate,
+      result,
+      observations,
+      sent_to_other: false,
+      type: 'exame'
+    };
 
-    res.status(201).json(dbResponse.rows[0]);
-    return;
+    await db2Collection.insert(id, exam, { timeout: 30000 });
+    res.status(201).json(exam);
   } catch (error) {
     console.error('Erro ao inserir exame:', error);
     res.status(500).json({ error: 'Erro ao inserir exame.' });
-    return;
   }
 });
 
-// Endpoint GET para retornar a quantidade de exames
 app.get('/exames/count', async (req: Request, res: Response) => {
   try {
-    const result = await pool.query('SELECT COUNT(*) FROM exames');
-    const count = parseInt(result.rows[0].count, 10);
-    res.json({ count });
+    const query = `
+      SELECT RAW COUNT(*) AS count 
+      FROM \`${process.env.DB_NAME}\` USE INDEX (\`idx_exame_covering\`)
+      WHERE type = "exame"
+    `;
+
+    const result = await db2Cluster.query(query, { timeout: 10000 });
+    res.json({ count: result.rows[0] || 0 });
   } catch (error) {
-    console.error('Erro ao consultar a quantidade de exames:', error);
-    res.status(500).json({ error: 'Erro ao consultar a quantidade de exames' });
+    console.error('Erro ao contar exames:', error);
+    res.status(500).json({ error: 'Erro ao contar exames.' });
   }
 });
 
-// Endpoint GET para retornar a lista de exames
 app.get('/exames', async (req: Request, res: Response) => {
   try {
-    const result = await pool.query('SELECT * FROM exames');
+    const query = `
+      SELECT RAW {
+        "id": META().id,
+        "patientName": patientName,
+        "examType": examType,
+        "examDate": examDate,
+        "result": result,
+        "observations": observations,
+        "sent_to_other": sent_to_other
+      }
+      FROM \`${process.env.DB_NAME}\` AS doc USE INDEX (\`idx_exame_covering\`)
+      WHERE doc.type = "exame"
+    `;
+
+    const result = await db2Cluster.query(query, { timeout: 10000 });
     res.json(result.rows);
   } catch (error) {
-    console.error('Erro ao consultar os exames:', error);
-    res.status(500).json({ error: 'Erro ao consultar os exames' });
+    console.error('Erro ao buscar exames:', error);
+    res.status(500).json({ error: 'Erro ao buscar exames.' });
   }
 });
 
-// Função assíncrona para sincronizar os exames com o outro banco (banco1)
+// Função de sincronização otimizada
 async function syncExams() {
   try {
-    // Seleciona os exames que ainda não foram enviados
-    const result = await pool.query("SELECT * FROM exames WHERE sent_to_other = false");
-    const examsToSync = result.rows;
+    const query = `
+      SELECT RAW {
+        "id": META().id,
+        "patientName": patientName,
+        "examType": examType,
+        "examDate": examDate,
+        "result": result,
+        "observations": observations
+      }
+      FROM \`${process.env.DB_NAME}\` AS doc USE INDEX (\`idx_exame_covering\`)
+      WHERE doc.type = "exame"
+      AND (doc.sent_to_other IS MISSING OR doc.sent_to_other = false)
+      LIMIT 100;
+    `;
+
+    console.log('Iniciado sincronização')
+    const queryResult = await db2Cluster.query(query, { timeout: 10000 });
+    const examsToSync: Exam[] = queryResult.rows;
 
     for (const exam of examsToSync) {
       try {
-        // Tenta inserir o exame no banco1 (não inclui o campo sent_to_other)
-        const insertQuery = `
-          INSERT INTO exames (patient_name, exam_type, exam_date, result, observations)
-          VALUES ($1, $2, $3, $4, $5)
-        `;
-        const values = [exam.patient_name, exam.exam_type, exam.exam_date, exam.result, exam.observations];
-        await poolOther.query(insertQuery, values);
+        await poolOther.query(
+          'INSERT INTO exames (patient_name, exam_type, exam_date, result, observations) VALUES ($1, $2, $3, $4, $5)',
+          [exam.patientName, exam.examType, exam.examDate, exam.result, exam.observations]
+        );
 
-        // Se a inserção no banco1 for bem-sucedida, marca o exame como enviado no banco2
-        await pool.query("UPDATE exames SET sent_to_other = true WHERE id = $1", [exam.id]);
+        await db2Collection.mutateIn(exam.id as string, [
+          couchbase.MutateInSpec.replace('sent_to_other', true)
+        ], { timeout: 30000 });
+
       } catch (err) {
-        // Se ocorrer erro na comunicação com o banco1, apenas loga o erro e continua (o exame não será marcado como enviado)
-        console.error(`Erro ao sincronizar exame (id: ${exam.id}) com o banco1. Tentarei novamente na próxima sincronização:`, err);
-        continue;
+        console.error(`Erro ao sincronizar exame ${exam.id}:`, err);
       }
     }
-    console.log(`Sync: ${examsToSync.length} exame(s) processado(s) em ${new Date().toISOString()}`);
+
+    if (examsToSync.length > 0) {
+      console.log(`Sync: ${examsToSync.length} exame(s) processado(s) em ${new Date().toISOString()}`);
+    } else {
+      console.log(`Sync: 0 exames processados em ${new Date().toISOString()}`)
+    }
   } catch (error) {
     console.error("Erro durante a sincronização:", error);
   }
 }
 
-// Agenda a task para rodar a cada 5 minutos (300000 ms)
-setInterval(syncExams, 300000);
+// Inicialização do servidor
+const startServer = async () => {
+  try {
+    await initDb2();
+    
+    // Inicia a sincronização a cada 5 minutos
+    setInterval(syncExams, 60000);
+    
+    // Primeira sincronização
+    syncExams();
 
-// Opcional: Executa a sincronização imediatamente ao iniciar o servidor
-syncExams();
+    app.listen(port, () => {
+      console.log(`Servidor rodando na porta ${port}`);
+    });
+  } catch (error) {
+    console.error('Falha ao inicializar o servidor:', error);
+    process.exit(1);
+  }
+};
 
-app.listen(port, () => {
-  console.log(`Servidor rodando na porta ${port}`);
-});
+startServer();

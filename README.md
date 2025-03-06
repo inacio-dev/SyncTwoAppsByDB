@@ -17,10 +17,18 @@ CREATE TABLE exames (
 );
 ```
 
-### Adicionar um campo para sincronizar exames no banco de número 2:
+### Adicionar bucket e usuário ao counchbase do DB2:
 
+Rodar os comandos abaixo no Workbench CLI do counchbase:
 ```
-ALTER TABLE exames ADD COLUMN sent_to_other BOOLEAN DEFAULT false;
+CREATE PRIMARY INDEX ON `bucket_teste`;
+
+CREATE INDEX idx_exame_type_sent
+ON `bucket_teste`(type, sent_to_other)
+WHERE type = "exame";
+
+CREATE INDEX idx_exame_covering ON `bucket_teste`(type, sent_to_other, patientName, examType, examDate, result, observations)
+WHERE type = "exame";
 ```
 
 ### Rodar os apps 1 e 2
